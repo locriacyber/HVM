@@ -77,7 +77,7 @@ fn run_cli() -> Result<(), String> {
   }
 }
 
-fn make_call(params: &Vec<String>) -> Result<language::Term, String> {
+fn make_call(params: &[String]) -> Result<language::Term, String> {
   let name = "Main".to_string();
   let mut args = Vec::new();
   for param in params {

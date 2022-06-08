@@ -85,7 +85,7 @@ pub fn build_dynfun(comp: &rb::RuleBook, rules: &[lang::Rule]) -> DynFun {
           match &**arg {
             lang::Term::Ctr { name, args } => {
               *redex = true;
-              cond.push(rt::Ctr(args.len() as u64, *comp.name_to_id.get(&*name).unwrap_or(&0), 0));
+              cond.push(rt::Ctr(args.len() as u64, *comp.name_to_id.get(name).unwrap_or(&0), 0));
               free.push((i as u64, args.len() as u64));
               for (j, arg) in args.iter().enumerate() {
                 if let lang::Term::Var { ref name } = **arg {
@@ -213,7 +213,7 @@ pub fn build_runtime_function(comp: &rb::RuleBook, rules: &[lang::Rule]) -> rt::
         // Collects unused variables (none in this example)
         for dynvar @ DynVar { param: _, field: _, erase } in dynrule.vars.iter() {
           if *erase {
-            rt::collect(mem, get_var(mem, term, dynvar));
+            rt::collect(mem, get_var(mem, term, &dynvar));
           }
         }
 
