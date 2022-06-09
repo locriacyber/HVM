@@ -1,12 +1,5 @@
-mod builder;
-mod compiler;
-mod language;
-mod parser;
-mod readback;
-mod rulebook;
-mod runtime;
-
 use clap::{Parser, Subcommand};
+use hvm::{language, builder, compiler};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -77,7 +70,7 @@ fn run_cli() -> Result<(), String> {
   }
 }
 
-fn make_call(params: &Vec<String>) -> Result<language::Term, String> {
+fn make_call(params: &[String]) -> Result<language::Term, String> {
   let name = "Main".to_string();
   let mut args = Vec::new();
   for param in params {

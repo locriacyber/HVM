@@ -85,7 +85,7 @@ pub fn build_dynfun(comp: &rb::RuleBook, rules: &[lang::Rule]) -> DynFun {
           match &**arg {
             lang::Term::Ctr { name, args } => {
               *redex = true;
-              cond.push(rt::Ctr(args.len() as u64, *comp.name_to_id.get(&*name).unwrap_or(&0), 0));
+              cond.push(rt::Ctr(args.len() as u64, *comp.name_to_id.get(name).unwrap_or(&0), 0));
               free.push((i as u64, args.len() as u64));
               for (j, arg) in args.iter().enumerate() {
                 if let lang::Term::Var { ref name } = **arg {
@@ -547,7 +547,7 @@ pub fn eval_code(
   let file = lang::read_file(code)?;
 
   // Converts the HVM "file" to a Rulebook
-  let book = rb::gen_rulebook(&file);
+  let book = rb::gen_rulebook(file);
 
   // Builds dynamic functions
   let functions = build_runtime_functions(&book);
