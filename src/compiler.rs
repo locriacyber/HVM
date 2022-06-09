@@ -1,6 +1,9 @@
 #![allow(clippy::identity_op)]
 
+use async_recursion::async_recursion;
+use futures::future::join_all;
 use regex::Regex;
+use tokio::runtime::Runtime;
 use std::collections::HashMap;
 use std::io::Write;
 
@@ -179,221 +182,251 @@ fn compile_func(comp: &rb::RuleBook, rules: &[lang::Rule], tab: u64) -> (String,
   (init, code)
 }
 
+#[async_recursion]
+async fn compile_term(
+  code: &mut String,
+  tab: u64,
+  vars: &mut Vec<String>,
+  nams: &mut u64,
+  globs: &mut HashMap<u64, String>,
+  term: &bd::DynTerm,
+) -> String {
+  const INLINE_NUMBERS: bool = true;
+  //println!("compile {:?}", term);
+  //println!("- vars: {:?}", vars);
+  match term {
+    bd::DynTerm::Var { bidx } => {
+      if *bidx < vars.len() as u64 {
+        vars[*bidx as usize].clone()
+      } else {
+        panic!("Unbound variable.");
+      }
+    }
+    bd::DynTerm::Glo { glob } => {
+      format!("Var({})", alloc_lam(code, tab, nams, globs, *glob))
+    }
+    bd::DynTerm::Dup { eras, expr, body } => {
+      //if INLINE_NUMBERS {
+      //line(code, tab + 0, &format!("if (get_tag({}) == U32 && get_tag({}) == U32) {{", val0, val1));
+      //}
+
+      let copy = fresh(nams, "cpy");
+      let dup0 = fresh(nams, "dp0");
+      let dup1 = fresh(nams, "dp1");
+      let expr = compile_term(code, tab, vars, nams, globs, expr).await;
+      line(code, tab, &format!("u64 {} = {};", copy, expr));
+      line(code, tab, &format!("u64 {};", dup0));
+      line(code, tab, &format!("u64 {};", dup1));
+      if INLINE_NUMBERS {
+        line(code, tab + 0, &format!("if (get_tag({}) == U32) {{", copy));
+        line(code, tab + 1, "inc_cost(mem);");
+        line(code, tab + 1, &format!("{} = {};", dup0, copy));
+        line(code, tab + 1, &format!("{} = {};", dup1, copy));
+        line(code, tab + 0, "} else {");
+      }
+      let name = fresh(nams, "dup");
+      let coln = fresh(nams, "col");
+      //let colx = *dups;
+      //*dups += 1;
+      line(code, tab + 1, &format!("u64 {} = alloc(mem, 3);", name));
+      line(code, tab + 1, &format!("u64 {} = gen_dupk(mem);", coln));
+      if eras.0 {
+        line(code, tab + 1, &format!("link(mem, {} + 0, Era());", name));
+      }
+      if eras.1 {
+        line(code, tab + 1, &format!("link(mem, {} + 1, Era());", name));
+      }
+      line(code, tab + 1, &format!("link(mem, {} + 2, {});", name, copy));
+      line(code, tab + 1, &format!("{} = Dp0({}, {});", dup0, coln, name));
+      line(code, tab + 1, &format!("{} = Dp1({}, {});", dup1, coln, name));
+      if INLINE_NUMBERS {
+        line(code, tab + 0, "}");
+      }
+      vars.push(dup0);
+      vars.push(dup1);
+      let body = compile_term(code, tab + 0, vars, nams, globs, body).await;
+      vars.pop();
+      vars.pop();
+      body
+    }
+    bd::DynTerm::Let { expr, body } => {
+      let expr = compile_term(code, tab, vars, nams, globs, expr).await;
+      vars.push(expr);
+      let body = compile_term(code, tab, vars, nams, globs, body).await;
+      vars.pop();
+      body
+    }
+    bd::DynTerm::Lam { eras, glob, body } => {
+      let name = alloc_lam(code, tab, nams, globs, *glob);
+      vars.push(format!("Var({})", name));
+      let body = compile_term(code, tab, vars, nams, globs, body).await;
+      vars.pop();
+      if *eras {
+        line(code, tab, &format!("link(mem, {} + 0, Era());", name));
+      }
+      line(code, tab, &format!("link(mem, {} + 1, {});", name, body));
+      format!("Lam({})", name)
+    }
+    bd::DynTerm::App { func, argm } => {
+      let name = fresh(nams, "app");
+      let func = compile_term(code, tab, vars, nams, globs, func).await;
+      let argm = compile_term(code, tab, vars, nams, globs, argm).await;
+      line(code, tab, &format!("u64 {} = alloc(mem, 2);", name));
+      line(code, tab, &format!("link(mem, {} + 0, {});", name, func));
+      line(code, tab, &format!("link(mem, {} + 1, {});", name, argm));
+      format!("App({})", name)
+    }
+    bd::DynTerm::Ctr { func, args } => {
+      let mut ctr_args = vec![];
+      for arg in args {
+        ctr_args.push(compile_term(code, tab, vars, nams, globs, arg).await);
+      }
+      // TODO: de-mut the arguments
+      // let : Vec<String> = {
+      //   let strings: Vec<(&bd::DynTerm, String)> = args.iter().map(|arg| (arg, String.new())).collect();
+      //   // compile_term(code, tab, vars, nams, globs, arg.clone());
+      //   // args.iter().async_map();
+      //   join_all(strings.iter().map(|arg| )).await;
+      //   code += strings.iter().fold(String::new(), |a, (_, b)| a + b);
+
+      // };
+      let name = fresh(nams, "ctr");
+      line(code, tab, &format!("u64 {} = alloc(mem, {});", name, ctr_args.len()));
+      for (i, arg) in ctr_args.iter().enumerate() {
+        line(code, tab, &format!("link(mem, {} + {}, {});", name, i, arg));
+      }
+      format!("Ctr({}, {}, {})", ctr_args.len(), func, name)
+    }
+    bd::DynTerm::Cal { func, args } => {
+      let mut cal_args: Vec<String> = vec![];
+      for arg in args {
+        cal_args.push(compile_term(code, tab, vars, nams, globs, arg).await);
+      }
+        // join_all(args.iter().map(|arg| compile_term(code, tab, vars, nams, globs, arg))).await;
+      let name = fresh(nams, "cal");
+      line(code, tab, &format!("u64 {} = alloc(mem, {});", name, cal_args.len()));
+      for (i, arg) in cal_args.iter().enumerate() {
+        line(code, tab, &format!("link(mem, {} + {}, {});", name, i, arg));
+      }
+      format!("Cal({}, {}, {})", cal_args.len(), func, name)
+    }
+    bd::DynTerm::U32 { numb } => {
+      format!("U_32({})", numb)
+    }
+    bd::DynTerm::Op2 { oper, val0, val1 } => {
+      let retx = fresh(nams, "ret");
+      let name = fresh(nams, "op2");
+      let val0 = compile_term(code, tab, vars, nams, globs, val0).await;
+      let val1 = compile_term(code, tab, vars, nams, globs, val1).await;
+      line(code, tab + 0, &format!("u64 {};", retx));
+      // Optimization: do inline operation, avoiding Op2 allocation, when operands are already number
+      if INLINE_NUMBERS {
+        line(
+          code,
+          tab + 0,
+          &format!("if (get_tag({}) == U32 && get_tag({}) == U32) {{", val0, val1),
+        );
+        let a = format!("get_val({})", val0);
+        let b = format!("get_val({})", val1);
+        match *oper {
+          rt::ADD => line(code, tab + 1, &format!("{} = U_32({} + {});", retx, a, b)),
+          rt::SUB => line(code, tab + 1, &format!("{} = U_32({} - {});", retx, a, b)),
+          rt::MUL => line(code, tab + 1, &format!("{} = U_32({} * {});", retx, a, b)),
+          rt::DIV => line(code, tab + 1, &format!("{} = U_32({} / {});", retx, a, b)),
+          rt::MOD => line(code, tab + 1, &format!("{} = U_32({} % {});", retx, a, b)),
+          rt::AND => line(code, tab + 1, &format!("{} = U_32({} & {});", retx, a, b)),
+          rt::OR => line(code, tab + 1, &format!("{} = U_32({} | {});", retx, a, b)),
+          rt::XOR => line(code, tab + 1, &format!("{} = U_32({} ^ {});", retx, a, b)),
+          rt::SHL => line(code, tab + 1, &format!("{} = U_32({} << {});", retx, a, b)),
+          rt::SHR => line(code, tab + 1, &format!("{} = U_32({} >> {});", retx, a, b)),
+          rt::LTN => line(code, tab + 1, &format!("{} = U_32({} <  {} ? 1 : 0);", retx, a, b)),
+          rt::LTE => line(code, tab + 1, &format!("{} = U_32({} <= {} ? 1 : 0);", retx, a, b)),
+          rt::EQL => line(code, tab + 1, &format!("{} = U_32({} == {} ? 1 : 0);", retx, a, b)),
+          rt::GTE => line(code, tab + 1, &format!("{} = U_32({} >= {} ? 1 : 0);", retx, a, b)),
+          rt::GTN => line(code, tab + 1, &format!("{} = U_32({} >  {} ? 1 : 0);", retx, a, b)),
+          rt::NEQ => line(code, tab + 1, &format!("{} = U_32({} != {} ? 1 : 0);", retx, a, b)),
+          _ => line(code, tab + 1, &format!("{} = ?;", retx)),
+        }
+        line(code, tab + 1, "inc_cost(mem);");
+        line(code, tab + 0, "} else {");
+      }
+      line(code, tab + 1, &format!("u64 {} = alloc(mem, 2);", name));
+      line(code, tab + 1, &format!("link(mem, {} + 0, {});", name, val0));
+      line(code, tab + 1, &format!("link(mem, {} + 1, {});", name, val1));
+      let oper_name = match *oper {
+        rt::ADD => "ADD",
+        rt::SUB => "SUB",
+        rt::MUL => "MUL",
+        rt::DIV => "DIV",
+        rt::MOD => "MOD",
+        rt::AND => "AND",
+        rt::OR => "OR",
+        rt::XOR => "XOR",
+        rt::SHL => "SHL",
+        rt::SHR => "SHR",
+        rt::LTN => "LTN",
+        rt::LTE => "LTE",
+        rt::EQL => "EQL",
+        rt::GTE => "GTE",
+        rt::GTN => "GTN",
+        rt::NEQ => "NEQ",
+        _ => "?",
+      };
+      line(code, tab + 1, &format!("{} = Op2({}, {});", retx, oper_name, name));
+      if INLINE_NUMBERS {
+        line(code, tab + 0, "}");
+      }
+      retx
+    }
+  }
+}
+
+fn alloc_lam(
+  code: &mut String,
+  tab: u64,
+  nams: &mut u64,
+  globs: &mut HashMap<u64, String>,
+  glob: u64,
+) -> String {
+  if let Some(got) = globs.get(&glob) {
+    got.clone()
+  } else {
+    let name = fresh(nams, "lam");
+    line(code, tab, &format!("u64 {} = alloc(mem, 2);", name));
+    if glob != 0 {
+      // FIXME: sanitizer still can't detect if a scopeless lambda doesn't use its bound
+      // variable, so we must write an Era() here. When it does, we can remove this line.
+      line(code, tab, &format!("link(mem, {} + 0, Era());", name));
+      globs.insert(glob, name.clone());
+    }
+    name
+  }
+}
+
+fn fresh(nams: &mut u64, name: &str) -> String {
+  let name = format!("{}_{}", name, nams);
+  *nams += 1;
+  name
+}
+
+fn compile_term_sync(
+  code: &mut String,
+  tab: u64,
+  vars: &mut Vec<String>,
+  nams: &mut u64,
+  globs: &mut HashMap<u64, String>,
+  term: &bd::DynTerm,
+) -> String {
+  let rt = Runtime::new().expect("No async runtime");
+  rt.block_on(compile_term(code, tab, vars, nams, globs, term))
+}
+
 fn compile_func_rule_term(
   code: &mut String,
   tab: u64,
   term: &bd::DynTerm,
   vars: &[bd::DynVar],
 ) -> String {
-  fn alloc_lam(
-    code: &mut String,
-    tab: u64,
-    nams: &mut u64,
-    globs: &mut HashMap<u64, String>,
-    glob: u64,
-  ) -> String {
-    if let Some(got) = globs.get(&glob) {
-      got.clone()
-    } else {
-      let name = fresh(nams, "lam");
-      line(code, tab, &format!("u64 {} = alloc(mem, 2);", name));
-      if glob != 0 {
-        // FIXME: sanitizer still can't detect if a scopeless lambda doesn't use its bound
-        // variable, so we must write an Era() here. When it does, we can remove this line.
-        line(code, tab, &format!("link(mem, {} + 0, Era());", name));
-        globs.insert(glob, name.clone());
-      }
-      name
-    }
-  }
-  fn compile_term(
-    code: &mut String,
-    tab: u64,
-    vars: &mut Vec<String>,
-    nams: &mut u64,
-    globs: &mut HashMap<u64, String>,
-    term: &bd::DynTerm,
-  ) -> String {
-    const INLINE_NUMBERS: bool = true;
-    //println!("compile {:?}", term);
-    //println!("- vars: {:?}", vars);
-    match term {
-      bd::DynTerm::Var { bidx } => {
-        if *bidx < vars.len() as u64 {
-          vars[*bidx as usize].clone()
-        } else {
-          panic!("Unbound variable.");
-        }
-      }
-      bd::DynTerm::Glo { glob } => {
-        format!("Var({})", alloc_lam(code, tab, nams, globs, *glob))
-      }
-      bd::DynTerm::Dup { eras, expr, body } => {
-        //if INLINE_NUMBERS {
-        //line(code, tab + 0, &format!("if (get_tag({}) == U32 && get_tag({}) == U32) {{", val0, val1));
-        //}
-
-        let copy = fresh(nams, "cpy");
-        let dup0 = fresh(nams, "dp0");
-        let dup1 = fresh(nams, "dp1");
-        let expr = compile_term(code, tab, vars, nams, globs, expr);
-        line(code, tab, &format!("u64 {} = {};", copy, expr));
-        line(code, tab, &format!("u64 {};", dup0));
-        line(code, tab, &format!("u64 {};", dup1));
-        if INLINE_NUMBERS {
-          line(code, tab + 0, &format!("if (get_tag({}) == U32) {{", copy));
-          line(code, tab + 1, "inc_cost(mem);");
-          line(code, tab + 1, &format!("{} = {};", dup0, copy));
-          line(code, tab + 1, &format!("{} = {};", dup1, copy));
-          line(code, tab + 0, "} else {");
-        }
-        let name = fresh(nams, "dup");
-        let coln = fresh(nams, "col");
-        //let colx = *dups;
-        //*dups += 1;
-        line(code, tab + 1, &format!("u64 {} = alloc(mem, 3);", name));
-        line(code, tab + 1, &format!("u64 {} = gen_dupk(mem);", coln));
-        if eras.0 {
-          line(code, tab + 1, &format!("link(mem, {} + 0, Era());", name));
-        }
-        if eras.1 {
-          line(code, tab + 1, &format!("link(mem, {} + 1, Era());", name));
-        }
-        line(code, tab + 1, &format!("link(mem, {} + 2, {});", name, copy));
-        line(code, tab + 1, &format!("{} = Dp0({}, {});", dup0, coln, name));
-        line(code, tab + 1, &format!("{} = Dp1({}, {});", dup1, coln, name));
-        if INLINE_NUMBERS {
-          line(code, tab + 0, "}");
-        }
-        vars.push(dup0);
-        vars.push(dup1);
-        let body = compile_term(code, tab + 0, vars, nams, globs, body);
-        vars.pop();
-        vars.pop();
-        body
-      }
-      bd::DynTerm::Let { expr, body } => {
-        let expr = compile_term(code, tab, vars, nams, globs, expr);
-        vars.push(expr);
-        let body = compile_term(code, tab, vars, nams, globs, body);
-        vars.pop();
-        body
-      }
-      bd::DynTerm::Lam { eras, glob, body } => {
-        let name = alloc_lam(code, tab, nams, globs, *glob);
-        vars.push(format!("Var({})", name));
-        let body = compile_term(code, tab, vars, nams, globs, body);
-        vars.pop();
-        if *eras {
-          line(code, tab, &format!("link(mem, {} + 0, Era());", name));
-        }
-        line(code, tab, &format!("link(mem, {} + 1, {});", name, body));
-        format!("Lam({})", name)
-      }
-      bd::DynTerm::App { func, argm } => {
-        let name = fresh(nams, "app");
-        let func = compile_term(code, tab, vars, nams, globs, func);
-        let argm = compile_term(code, tab, vars, nams, globs, argm);
-        line(code, tab, &format!("u64 {} = alloc(mem, 2);", name));
-        line(code, tab, &format!("link(mem, {} + 0, {});", name, func));
-        line(code, tab, &format!("link(mem, {} + 1, {});", name, argm));
-        format!("App({})", name)
-      }
-      bd::DynTerm::Ctr { func, args } => {
-        let ctr_args: Vec<String> =
-          args.iter().map(|arg| compile_term(code, tab, vars, nams, globs, arg)).collect();
-        let name = fresh(nams, "ctr");
-        line(code, tab, &format!("u64 {} = alloc(mem, {});", name, ctr_args.len()));
-        for (i, arg) in ctr_args.iter().enumerate() {
-          line(code, tab, &format!("link(mem, {} + {}, {});", name, i, arg));
-        }
-        format!("Ctr({}, {}, {})", ctr_args.len(), func, name)
-      }
-      bd::DynTerm::Cal { func, args } => {
-        let cal_args: Vec<String> =
-          args.iter().map(|arg| compile_term(code, tab, vars, nams, globs, arg)).collect();
-        let name = fresh(nams, "cal");
-        line(code, tab, &format!("u64 {} = alloc(mem, {});", name, cal_args.len()));
-        for (i, arg) in cal_args.iter().enumerate() {
-          line(code, tab, &format!("link(mem, {} + {}, {});", name, i, arg));
-        }
-        format!("Cal({}, {}, {})", cal_args.len(), func, name)
-      }
-      bd::DynTerm::U32 { numb } => {
-        format!("U_32({})", numb)
-      }
-      bd::DynTerm::Op2 { oper, val0, val1 } => {
-        let retx = fresh(nams, "ret");
-        let name = fresh(nams, "op2");
-        let val0 = compile_term(code, tab, vars, nams, globs, val0);
-        let val1 = compile_term(code, tab, vars, nams, globs, val1);
-        line(code, tab + 0, &format!("u64 {};", retx));
-        // Optimization: do inline operation, avoiding Op2 allocation, when operands are already number
-        if INLINE_NUMBERS {
-          line(
-            code,
-            tab + 0,
-            &format!("if (get_tag({}) == U32 && get_tag({}) == U32) {{", val0, val1),
-          );
-          let a = format!("get_val({})", val0);
-          let b = format!("get_val({})", val1);
-          match *oper {
-            rt::ADD => line(code, tab + 1, &format!("{} = U_32({} + {});", retx, a, b)),
-            rt::SUB => line(code, tab + 1, &format!("{} = U_32({} - {});", retx, a, b)),
-            rt::MUL => line(code, tab + 1, &format!("{} = U_32({} * {});", retx, a, b)),
-            rt::DIV => line(code, tab + 1, &format!("{} = U_32({} / {});", retx, a, b)),
-            rt::MOD => line(code, tab + 1, &format!("{} = U_32({} % {});", retx, a, b)),
-            rt::AND => line(code, tab + 1, &format!("{} = U_32({} & {});", retx, a, b)),
-            rt::OR => line(code, tab + 1, &format!("{} = U_32({} | {});", retx, a, b)),
-            rt::XOR => line(code, tab + 1, &format!("{} = U_32({} ^ {});", retx, a, b)),
-            rt::SHL => line(code, tab + 1, &format!("{} = U_32({} << {});", retx, a, b)),
-            rt::SHR => line(code, tab + 1, &format!("{} = U_32({} >> {});", retx, a, b)),
-            rt::LTN => line(code, tab + 1, &format!("{} = U_32({} <  {} ? 1 : 0);", retx, a, b)),
-            rt::LTE => line(code, tab + 1, &format!("{} = U_32({} <= {} ? 1 : 0);", retx, a, b)),
-            rt::EQL => line(code, tab + 1, &format!("{} = U_32({} == {} ? 1 : 0);", retx, a, b)),
-            rt::GTE => line(code, tab + 1, &format!("{} = U_32({} >= {} ? 1 : 0);", retx, a, b)),
-            rt::GTN => line(code, tab + 1, &format!("{} = U_32({} >  {} ? 1 : 0);", retx, a, b)),
-            rt::NEQ => line(code, tab + 1, &format!("{} = U_32({} != {} ? 1 : 0);", retx, a, b)),
-            _ => line(code, tab + 1, &format!("{} = ?;", retx)),
-          }
-          line(code, tab + 1, "inc_cost(mem);");
-          line(code, tab + 0, "} else {");
-        }
-        line(code, tab + 1, &format!("u64 {} = alloc(mem, 2);", name));
-        line(code, tab + 1, &format!("link(mem, {} + 0, {});", name, val0));
-        line(code, tab + 1, &format!("link(mem, {} + 1, {});", name, val1));
-        let oper_name = match *oper {
-          rt::ADD => "ADD",
-          rt::SUB => "SUB",
-          rt::MUL => "MUL",
-          rt::DIV => "DIV",
-          rt::MOD => "MOD",
-          rt::AND => "AND",
-          rt::OR => "OR",
-          rt::XOR => "XOR",
-          rt::SHL => "SHL",
-          rt::SHR => "SHR",
-          rt::LTN => "LTN",
-          rt::LTE => "LTE",
-          rt::EQL => "EQL",
-          rt::GTE => "GTE",
-          rt::GTN => "GTN",
-          rt::NEQ => "NEQ",
-          _ => "?",
-        };
-        line(code, tab + 1, &format!("{} = Op2({}, {});", retx, oper_name, name));
-        if INLINE_NUMBERS {
-          line(code, tab + 0, "}");
-        }
-        retx
-      }
-    }
-  }
-  fn fresh(nams: &mut u64, name: &str) -> String {
-    let name = format!("{}_{}", name, nams);
-    *nams += 1;
-    name
-  }
   let mut nams = 0;
   let mut vars: Vec<String> = vars
     .iter()
@@ -407,7 +440,7 @@ fn compile_func_rule_term(
     })
     .collect();
   let mut globs: HashMap<u64, String> = HashMap::new();
-  compile_term(code, tab, &mut vars, &mut nams, &mut globs, term)
+  compile_term_sync(code, tab, &mut vars, &mut nams, &mut globs, term)
 }
 
 fn get_var(var: &bd::DynVar) -> String {
