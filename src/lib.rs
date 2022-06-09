@@ -10,6 +10,7 @@ pub mod readback;
 pub mod rulebook;
 pub mod runtime;
 pub mod sanitize;
+pub mod atomic;
 
 pub use builder::eval_code;
 

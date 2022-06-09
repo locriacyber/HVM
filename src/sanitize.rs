@@ -4,6 +4,8 @@ use crate::{
   rulebook::{duplicator, is_global_name},
 };
 use std::collections::{BTreeMap, HashMap};
+use async_recursion::async_recursion;
+use tokio::runtime::Runtime;
 
 #[allow(dead_code)]
 pub struct SanitizedRule {
@@ -53,14 +55,18 @@ fn rename_erased(name: &mut String, uses: &HashMap<String, u64>) {
   }
 }
 
-fn duplicate_inplace(body: &mut lang::Term, new_name: &str, expr: &lang::Term, ctx: &CtxSanitizeTerm) {
-    *body = duplicator(new_name, expr, body.clone(), ctx.uses)
+fn duplicate_inplace(
+  body: &mut lang::Term,
+  new_name: &str,
+  expr: &lang::Term,
+  ctx: &CtxSanitizeTerm,
+) {
+  *body = duplicator(new_name, expr, body.clone(), ctx.uses)
 }
-
 
 pub struct CtxSanitizeTerm<'a> {
   pub uses: &'a mut HashMap<String, u64>,
-  pub fresh: &'a mut dyn FnMut() -> String,
+  pub fresh: crate::atomic::NewStringGenerator,
 }
 
 pub fn sanitize_term_inplace<'a>(
@@ -68,6 +74,17 @@ pub fn sanitize_term_inplace<'a>(
   lhs: bool,
   tbl: &mut NameTable,
   ctx: &mut CtxSanitizeTerm,
+) -> Result<(), String> {
+    let rt = Runtime::new().map_err(|e| e.to_string())?;
+    rt.block_on(_sanitize_term_inplace(term, lhs, tbl, ctx))
+}
+
+#[async_recursion]
+async fn _sanitize_term_inplace(
+  term: &mut lang::Term,
+  lhs: bool,
+  tbl: &mut NameTable,
+  ctx: &mut CtxSanitizeTerm<'_>,
 ) -> Result<(), String> {
   match term {
     lang::Term::Var { name } => {
@@ -96,16 +113,16 @@ pub fn sanitize_term_inplace<'a>(
     }
 
     lang::Term::Dup { expr, body, nam0, nam1 } => {
-      sanitize_term_inplace(expr, lhs, tbl, ctx)?;
+      _sanitize_term_inplace(expr, lhs, tbl, ctx).await?;
 
-      let new_nam0 = (ctx.fresh)();
-      let new_nam1 = (ctx.fresh)();
+      let new_nam0 = ctx.fresh.new_string();
+      let new_nam1 = ctx.fresh.new_string();
       let got_nam0 = tbl.remove(nam0);
       let got_nam1 = tbl.remove(nam1);
       tbl.insert(nam0.clone(), new_nam0.clone());
       tbl.insert(nam1.clone(), new_nam1.clone());
 
-      sanitize_term_inplace(body, lhs, tbl, ctx)?;
+      _sanitize_term_inplace(body, lhs, tbl, ctx).await?;
 
       tbl.remove(nam0);
 
@@ -121,13 +138,13 @@ pub fn sanitize_term_inplace<'a>(
     }
 
     lang::Term::Let { name, expr, body } => {
-      sanitize_term_inplace(expr, lhs, tbl, ctx)?;
+      _sanitize_term_inplace(expr, lhs, tbl, ctx).await?;
 
-      let new_name = (ctx.fresh)();
+      let new_name = ctx.fresh.new_string();
       let got_name = tbl.remove(name);
       tbl.insert(name.clone(), new_name.clone());
 
-      sanitize_term_inplace(body, lhs, tbl, ctx)?;
+      _sanitize_term_inplace(body, lhs, tbl, ctx).await?;
 
       tbl.remove(name);
       if let Some(x) = got_name {
@@ -135,13 +152,13 @@ pub fn sanitize_term_inplace<'a>(
       }
       duplicate_inplace(body, &new_name, expr, ctx);
     }
-    
+
     lang::Term::Lam { name, body } => {
-      let mut new_name = if is_global_name(name) { name.clone() } else { (ctx.fresh)() };
+      let mut new_name = if is_global_name(name) { name.clone() } else { ctx.fresh.new_string() };
       let got_name = tbl.remove(name);
       tbl.insert(name.clone(), new_name.clone());
 
-      sanitize_term_inplace(body, lhs, tbl, ctx)?;
+      _sanitize_term_inplace(body, lhs, tbl, ctx).await?;
 
       tbl.remove(name);
       if let Some(x) = got_name {
@@ -155,19 +172,19 @@ pub fn sanitize_term_inplace<'a>(
 
     // noop
     lang::Term::App { func, argm } => {
-      sanitize_term_inplace(func, lhs, tbl, ctx)?;
-      sanitize_term_inplace(argm, lhs, tbl, ctx)?;
+      _sanitize_term_inplace(func, lhs, tbl, ctx).await?;
+      _sanitize_term_inplace(argm, lhs, tbl, ctx).await?;
     }
     // noop
     lang::Term::Ctr { name: _, args } => {
       for arg in args {
-        sanitize_term_inplace(arg, lhs, tbl, ctx)?;
+        _sanitize_term_inplace(arg, lhs, tbl, ctx).await?;
       }
     }
     // noop
     lang::Term::Op2 { oper: _, val0, val1 } => {
-      sanitize_term_inplace(val0, lhs, tbl, ctx)?;
-      sanitize_term_inplace(val1, lhs, tbl, ctx)?;
+      _sanitize_term_inplace(val0, lhs, tbl, ctx).await?;
+      _sanitize_term_inplace(val1, lhs, tbl, ctx).await?;
     }
     // noop
     lang::Term::U32 { numb: _ } => {}

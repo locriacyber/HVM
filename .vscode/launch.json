@@ -19,27 +19,8 @@
           "kind": "bin"
         }
       },
-      "args": [],
+      "args": ["compile", "examples/dependent-type-checker.hvm"],
       "cwd": "${workspaceFolder}"
     },
-    {
-      "type": "lldb",
-      "request": "launch",
-      "name": "Debug unit tests in executable 'hvm'",
-      "cargo": {
-        "args": [
-          "test",
-          "--no-run",
-          "--bin=hvm",
-          "--package=hvm"
-        ],
-        "filter": {
-          "name": "hvm",
-          "kind": "bin"
-        }
-      },
-      "args": [],
-      "cwd": "${workspaceFolder}"
-    }
   ]
 }

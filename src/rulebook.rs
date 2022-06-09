@@ -1,5 +1,6 @@
 use crate::language as lang;
 use std::collections::{HashMap, HashSet};
+use crate::atomic::NewStringGenerator;
 
 // RuleBook
 // ========
@@ -226,23 +227,16 @@ pub fn sanitize_rule_inplace(rule: &mut lang::Rule) -> Result<(), String> {
   // for every variable found in the style described before with
   // the fresh function. Also checks if rule's left side is valid.
 
-  let mut size = 0;
   let mut uses: HashMap<String, u64> = HashMap::new();
 
-  // creates a new name for a variable
-  // the first will receive x0, second x1, ...
-  let mut fresh = || {
-    let key = format!("x{}", size);
-    size += 1;
-    key
-  };
+  let mut fresh: NewStringGenerator = Default::default();
 
   // generate table containing the new_names following
   // pattern described before
-  let table = create_fresh(rule, &mut fresh)?;
+  let table = create_fresh(rule, &mut || fresh.new_string())?;
 
   // create context for sanitize_term
-  let mut ctx = CtxSanitizeTerm { uses: &mut uses, fresh: &mut fresh };
+  let mut ctx = CtxSanitizeTerm { uses: &mut uses, fresh };
 
   // sanitize left and right sides
   // let lang::Rule { lhs, rhs } = rule;
