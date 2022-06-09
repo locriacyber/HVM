@@ -9,6 +9,7 @@ pub mod parser;
 pub mod readback;
 pub mod rulebook;
 pub mod runtime;
+pub mod sanitize;
 
 pub use builder::eval_code;
 

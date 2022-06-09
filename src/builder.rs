@@ -213,7 +213,7 @@ pub fn build_runtime_function(comp: &rb::RuleBook, rules: &[lang::Rule]) -> rt::
         // Collects unused variables (none in this example)
         for dynvar @ DynVar { param: _, field: _, erase } in dynrule.vars.iter() {
           if *erase {
-            rt::collect(mem, get_var(mem, term, &dynvar));
+            rt::collect(mem, get_var(mem, term, dynvar));
           }
         }
 
@@ -534,7 +534,7 @@ pub fn eval_code(
   let file = lang::read_file(code)?;
 
   // Converts the HVM "file" to a Rulebook
-  let book = rb::gen_rulebook(&file);
+  let book = rb::gen_rulebook(file);
 
   // Builds dynamic functions
   let functions = build_runtime_functions(&book);

@@ -85,12 +85,12 @@ pub fn add_group(book: &mut RuleBook, name: &str, group: &RuleGroup) {
 }
 
 // Converts a file to a rulebook
-pub fn gen_rulebook(file: &lang::File) -> RuleBook {
+pub fn gen_rulebook(file: lang::File) -> RuleBook {
   // Creates an empty rulebook
   let mut book = new_rulebook();
 
   // Flattens, sanitizes and groups this file's rules
-  let groups = group_rules(&sanitize_rules(&flatten(&file.rules)));
+  let groups = group_rules(sanitize_rules(flatten(&file.rules)).into_iter());
 
   // Adds each group
   for (name, group) in groups.iter() {
@@ -106,7 +106,7 @@ pub fn gen_rulebook(file: &lang::File) -> RuleBook {
 //   (add (zero)   (succ b)) = (succ b)
 //   (add (zero)   (zero)  ) = (zero)
 // This is a group of 4 rules starting with the "add" name.
-pub fn group_rules(rules: &[lang::Rule]) -> HashMap<String, RuleGroup> {
+pub fn group_rules<T>(rules: T) -> HashMap<String, RuleGroup> where T: std::iter::Iterator<Item=lang::Rule> {
   let mut groups: HashMap<String, RuleGroup> = HashMap::new();
   for rule in rules {
     if let lang::Term::Ctr { ref name, ref args } = *rule.lhs {
@@ -375,7 +375,12 @@ fn duplicator_go(
   }
 }
 
-// FIXME: right now, the sanitizer isn't able to identify if a scopeless lambda doesn't use its
+
+pub fn sanitize_rule(rule: lang::Rule) -> Result<lang::Rule, String> {
+  sanitize_rule_legacy(&rule)
+}
+
+  // FIXME: right now, the sanitizer isn't able to identify if a scopeless lambda doesn't use its
 // bound variable, so it won't set the "eras" flag to "true" in this case, but it should.
 
 // This big function sanitizes a rule. That has the following effect:
@@ -387,7 +392,7 @@ fn duplicator_go(
 // Example:
 //   - sanitizing: `(Foo a b) = (+ a a)`
 //   - results in: `(Foo x0 *) = dup x0.0 x0.1 = x0; (+ x0.0 x0.1)`
-pub fn sanitize_rule(rule: &lang::Rule) -> Result<lang::Rule, String> {
+pub fn sanitize_rule_legacy(rule: &lang::Rule) -> Result<lang::Rule, String> {
   // Pass through the lhs of the function generating new names
   // for every variable found in the style described before with
   // the fresh function. Also checks if rule's left side is valid.
@@ -425,11 +430,12 @@ pub fn sanitize_rule(rule: &lang::Rule) -> Result<lang::Rule, String> {
 }
 
 // Sanitizes all rules in a vector
-pub fn sanitize_rules(rules: &[lang::Rule]) -> Vec<lang::Rule> {
+pub fn sanitize_rules<T: std::iter::Iterator<Item=lang::Rule>>(rules: impl IntoIterator<IntoIter=T>) -> Vec<lang::Rule> {
   rules
-    .iter()
+    .into_iter()
     .map(|rule| {
-      match sanitize_rule(rule) {
+      // optimize: no clone here
+      match sanitize_rule(rule.clone()) {
         Ok(rule) => rule,
         Err(err) => {
           println!("{}", err);
@@ -445,7 +451,7 @@ pub fn sanitize_rules(rules: &[lang::Rule]) -> Vec<lang::Rule> {
 mod tests {
   use core::panic;
 
-  use super::{gen_rulebook, sanitize_rule};
+  use super::{gen_rulebook, sanitize_rule_legacy};
   use crate::language::{read_file, read_rule};
 
   #[test]
@@ -477,7 +483,7 @@ mod tests {
       match rule {
         None => panic!("Rule not parsed"),
         Some(v) => {
-          let result = sanitize_rule(&v);
+          let result = sanitize_rule_legacy(&v);
           match result {
             Ok(rule) => assert_eq!(rule.to_string(), expected),
             Err(_) => panic!("Rule not sanitized"),
@@ -503,7 +509,7 @@ mod tests {
       match rule {
         None => panic!("Rule not parsed"),
         Some(v) => {
-          let result = sanitize_rule(&v);
+          let result = sanitize_rule_legacy(&v);
           assert!(matches!(result, Err(_)));
         }
       }
@@ -518,7 +524,7 @@ mod tests {
     ";
 
     let file = read_file(file).unwrap();
-    let rulebook = gen_rulebook(&file);
+    let rulebook = gen_rulebook(file);
 
     // rule_group testing
     // contains expected key
@@ -559,6 +565,7 @@ mod tests {
 
 // Split rules that have nested cases, flattening them.
 // I'm not proud of this code. Must improve considerably.
+// optimize opputunity:: make this lazy iterator
 pub fn flatten(rules: &[lang::Rule]) -> Vec<lang::Rule> {
   // Unique name generator
   let mut name_count = 0;

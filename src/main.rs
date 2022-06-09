@@ -1,12 +1,5 @@
-mod builder;
-mod compiler;
-mod language;
-mod parser;
-mod readback;
-mod rulebook;
-mod runtime;
-
 use clap::{Parser, Subcommand};
+use hvm::{language, builder, compiler};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]

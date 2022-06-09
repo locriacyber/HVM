@@ -24,7 +24,7 @@ pub fn compile_code_and_save(code: &str, file_name: &str, parallel: bool) -> Res
 
 fn compile_code(code: &str, parallel: bool) -> Result<String, String> {
   let file = lang::read_file(code)?;
-  let book = rb::gen_rulebook(&file);
+  let book = rb::gen_rulebook(file);
   bd::build_runtime_functions(&book);
   Ok(compile_book(&book, parallel))
 }
