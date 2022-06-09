@@ -135,10 +135,10 @@ use crate::sanitize::*;
 // applying dup on them.
 pub fn duplicator(
   name: &str,
-  expr: Box<lang::Term>,
-  body: Box<lang::Term>,
+  expr: &lang::Term,
+  body: lang::Term,
   uses: &HashMap<String, u64>,
-) -> Box<lang::Term> {
+) -> lang::Term {
   let amount = uses.get(name).copied();
 
   match amount {
@@ -150,8 +150,7 @@ pub fn duplicator(
         std::cmp::Ordering::Less => body,
         // if used once just make a let then
         std::cmp::Ordering::Equal => {
-          let term = lang::Term::Let { name: format!("{}.0", name), expr, body };
-          Box::new(term)
+          lang::Term::Let { name: format!("{}.0", name), expr: Box::new(expr.clone()), body: Box::new(body) }
         }
         // if used more then once duplicate
         std::cmp::Ordering::Greater => {
@@ -174,14 +173,12 @@ pub fn duplicator(
           }
 
           // use aux variables to duplicate the variable
-          let dup = lang::Term::Dup {
+          lang::Term::Dup {
             nam0: vars.pop().unwrap(),
             nam1: vars.pop().unwrap(),
-            expr,
-            body: duplicator_go(1, duplicated_times, body, &mut vars),
-          };
-
-          Box::new(dup)
+            expr: Box::new(expr.clone()),
+            body: duplicator_go(1, duplicated_times, Box::new(body), &mut vars),
+          }
         }
       }
     }
@@ -224,7 +221,7 @@ fn duplicator_go(
 // Example:
 //   - sanitizing: `(Foo a b) = (+ a a)`
 //   - results in: `(Foo x0 *) = dup x0.0 x0.1 = x0; (+ x0.0 x0.1)`
-pub fn sanitize_rule(rule: lang::Rule) -> Result<lang::Rule, String> {
+pub fn sanitize_rule_inplace(rule: &mut lang::Rule) -> Result<(), String> {
   // Pass through the lhs of the function generating new names
   // for every variable found in the style described before with
   // the fresh function. Also checks if rule's left side is valid.
@@ -242,33 +239,43 @@ pub fn sanitize_rule(rule: lang::Rule) -> Result<lang::Rule, String> {
 
   // generate table containing the new_names following
   // pattern described before
-  let table = create_fresh(&rule, &mut fresh)?;
+  let table = create_fresh(rule, &mut fresh)?;
 
   // create context for sanitize_term
   let mut ctx = CtxSanitizeTerm { uses: &mut uses, fresh: &mut fresh };
 
   // sanitize left and right sides
-  let mut rhs = sanitize_term(&*rule.rhs, false, &mut table.clone(), &mut ctx)?;
-  let lhs = sanitize_term(&*rule.lhs, true, &mut table.clone(), &mut ctx)?;
+  // let lang::Rule { lhs, rhs } = rule;
+  let lhs = &mut *rule.lhs;
+  let rhs = &mut *rule.rhs;
+
+  sanitize_term_inplace(lhs, true, &mut table.clone(), &mut ctx)?;
+  sanitize_term_inplace(rhs, false, &mut table.clone(), &mut ctx)?;
 
   // duplicate right side variables that are used more than once
   for (_key, value) in table {
     let expr = Box::new(lang::Term::Var { name: value.clone() });
-    rhs = duplicator(&value, expr, rhs, &uses);
+    *rhs = duplicator(&value, &expr, rhs.clone(), &uses);
   }
 
-  // returns the sanitized rule
-  Ok(lang::Rule { lhs, rhs })
+  Ok(())
+}
+
+pub fn sanitize_rule(rule: &lang::Rule) -> Result<lang::Rule, String> {
+  let mut rule = rule.clone();
+  sanitize_rule_inplace(&mut rule)?;
+  Ok(rule)
 }
 
 // Sanitizes all rules in a vector
 pub fn sanitize_rules<T: std::iter::Iterator<Item=lang::Rule>>(rules: impl IntoIterator<IntoIter=T>) -> Vec<lang::Rule> {
   rules
     .into_iter()
-    .map(|rule| {
+    .map(|mut rule| {
       // optimize: no clone here
-      match sanitize_rule(rule.clone()) {
-        Ok(rule) => rule,
+      
+      match sanitize_rule_inplace(&mut rule) {
+        Ok(()) => rule,
         Err(err) => {
           println!("{}", err);
           println!("On rule: `{}`.", rule);
@@ -315,7 +322,7 @@ mod tests {
       match rule {
         None => panic!("Rule not parsed"),
         Some(v) => {
-          let result = sanitize_rule(v);
+          let result = sanitize_rule(&v);
           match result {
             Ok(rule) => assert_eq!(rule.to_string(), expected),
             Err(_) => panic!("Rule not sanitized"),
@@ -341,7 +348,7 @@ mod tests {
       match rule {
         None => panic!("Rule not parsed"),
         Some(v) => {
-          let result = sanitize_rule(v);
+          let result = sanitize_rule(&v);
           assert!(matches!(result, Err(_)));
         }
       }
